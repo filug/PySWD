@@ -16,3 +16,4 @@ bothering with the embedded bootloader.
 
 UPDATES:
 * Added 6/7/2011 by hugovincent: Energy Micro EFM32 support.
+* Added 16/3/2015 by filug: Extended feature set for EFM32
