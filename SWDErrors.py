@@ -16,4 +16,6 @@ class SWDParityError(Exception):
 class SWDNotPresentError(Exception):
     "Target not present or does not respond"
     pass
-
+class SWDTimeout(Exception):
+    "Operation timeouted"
+    pass

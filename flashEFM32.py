@@ -1,8 +1,12 @@
-#!/usr/bin/python
+#!/usr/bin/env python
+
+# EFM32 controller
+# modified by Piotr L. Figlarek (piotr.figlarek@gmail.com)
 
 import time
 import sys
 import array
+from optparse import OptionParser
 
 from PirateSWD import *
 from SWDCommon import *
@@ -11,68 +15,122 @@ from EFM32 import *
 def loadFile(path):
     arr = array.array('I')
     try:
-        arr.fromfile(open(sys.argv[1], 'rb'), 1024*1024)
+        arr.fromfile(open(path, 'rb'), 1024*1024)
     except EOFError:
         pass
     return arr.tolist()
 
 def main():
-    busPirate = PirateSWD("/dev/ttyUSB0", vreg = True)
-    debugPort = DebugPort(busPirate)
-    efm32     = EFM32(debugPort)
+        
+    parser = OptionParser(version="1.0", add_help_option=False)
+    parser.add_option("-p", "--port",
+                      action="store", type="string", dest="port", default=None,
+                      help="Bus Pirate serial port (if not defined Bus Pirate will be detected automatically)")
+    parser.add_option("-f", "--file",
+                      action="store", type="string", dest="file", default=None,
+                      help="name of binary image file")
+    parser.add_option("-u", "--unlock",
+                      action="store_true", dest="unlock", 
+                      help="unlock debug mode")
+    parser.add_option("-o", "--offset",
+                      action="store", type="int", dest="offset", default=0,
+                      help="program FLASH memory with provided offset")
+    parser.add_option("", "--eraseall",
+                      action="store_true", dest="eraseall", 
+                      help="erase all FLASH memory")
+    parser.add_option("", "--pagesize",
+                      action="store", type="int", dest="flashpagesize", default=0, 
+                      help="use following value for flash page size (ignore value read from EFM32)")
+    parser.add_option("", "--noreset",
+                      action="store_false", dest="reset", default=True,
+                      help="don't reset EFM32 on exit")
+    parser.add_option("-h", "--help",
+                      action="store_true", dest="help", 
+                      help="show this help")
+    
+    (options, args) = parser.parse_args()
+    
+    # show help 
+    if options.help:
+        parser.print_help()
+        print("")
+        print("Please connect your Bus Pirate to the EFM32 in this way:\n\n" \
+              " +------------+        +-------------+ \n" \
+              " | Bus Pirate |        |   EFM32*    | \n" \
+              " +------------+        +-------------+ \n" \
+              " |       MOSI |<------>| SWDIO (PF1) | \n" \
+              " |        CLK |------->| SWCLK (PF0) | \n" \
+              " +------------+        +-------------+ \n\n" \
+              "This script is executing following scenario:\n" \
+              " 1. unlocking debug mode (if selected),\n" \
+              " 2. detecting type of EFM32 microcontroller,\n" \
+              " 3. erasing FLASH memory (if file with firmware is provided),\n" \
+              " 4. programming FLASH memory (if file with firmware is provided).\n")
+        exit(0)
+    
+    try:
+        # connect with EFM32 through Bus Pirate    
+        busPirate = PirateSWD(options.port, vreg = True)
+        debugPort = DebugPort(busPirate)
+        efm32 = EFM32(debugPort)
 
-    part_info = efm32.ahb.readWord(0x0FE081FC) # PART_NUMBER, PART_FAMILY, PROD_REV
-    mem_info = efm32.ahb.readWord(0x0FE081F8)  # MEM_INFO_FLASH, MEM_INFO_RAM
-    rev = (efm32.ahb.readWord(0xE00FFFE8) & 0xF0) | ((efm32.ahb.readWord(0xE00FFFEC) & 0xF0) >> 4) # PID2 and PID3 - see section 7.3.4 in reference manual
-    rev = chr(rev + ord('A'))
-    flash_size = mem_info & 0xFFFF
-    family = part_info >> 16 & 0xFF
-    print "Connected."
-    page_size = 512
-    if family == 71:
-        print "Part number: EFM32G%dF%d (rev %c, production ID %dd)" % (part_info & 0xFF, 
-                flash_size, rev, part_info >> 24 & 0xFF)
-    elif family == 72:
-        print "Part number: EFM32GG%dF%d (rev %c, production ID %dd)" % (part_info & 0xFF, 
-                flash_size, rev, part_info >> 24 & 0xFF)
-        raise Exception("TODO read page size")
-    elif family == 73:
-        print "Part number: EFM32TG%dF%d (rev %c, production ID %dd)" % (part_info & 0xFF, 
-                flash_size, rev, part_info >> 24 & 0xFF)
-        raise Exception("TODO read page size")
-    elif family == 74:
-        print "Part number: EFM32LG%dF%d (rev %c, production ID %dd)" % (part_info & 0xFF, 
-                flash_size, rev, part_info >> 24 & 0xFF)
-        raise Exception("TODO read page size")
-    elif family == 76:
-        print "Part number: EFM32ZG%dF%d (rev %c, production ID %dd)" % (part_info & 0xFF, 
-                flash_size, rev, part_info >> 24 & 0xFF)
-        page_size = 1024
-    else:
-        print "Warning: unknown part"
-        sys.exit()
-    print "Loading '%s'..." % sys.argv[1],
-    vals = loadFile(sys.argv[1])
-    size = len(vals) * 4
-    print "%d bytes." % size
-    if size / 1024.0 > flash_size:
-        print "Firmware will not fit into flash!"
-        sys.exit(1)
+        # unclocking EFM32 debug
+        if options.unlock:
+            print("--== Step 1: Unlocking debug mode ==--")
+            efm32.unlockDebug()
+            time.sleep(1)
+        else:
+            print("--== Step 1: Unlocking debug mode (SKIPPED) ==--")
+        print("")
+        
+        
+        # detect type of EFM32
+        print("--== Step 2: Detecting microcontroller ==--")
+        efm32.detectType()
+        print("")
+        
+        # erase all memory if requested
+        if options.eraseall:
+            print("--== Step 3: Erasing FLASH memory (all) ==--")
+            efm32.halt()
+            efm32.flashUnlock()
+            efm32.flashEraseAll(options.flashpagesize)
+        elif options.file:
+            print("--== Step 3: Erasing FLASH memory (needed by firmware) ==--")
+            firmware = loadFile(options.file)
+            length = len(firmware) * 4
+            
+            efm32.halt()
+            efm32.flashUnlock()            
+            efm32.flashErase(options.offset, length, options.flashpagesize)
+        else:
+            print("--== Step 3: Erasing FLASH memory (SKIPPED) ==--")
+        print("")
+            
+        # otherwise erase only this what is needed
+        if options.file:
+            print("--== Step 4: Programming FLASH memory ==--")
+            firmware = loadFile(options.file)
+            efm32.flashProgram(options.offset, firmware)
+        else:
+            print("--== Step 4: Programming FLASH memory (SKIPPED) ==--")
+        print("")
+        
+        # reset if possible
+        if options.reset:
+            efm32.sysReset()
 
-    efm32.halt()
-    efm32.flashUnlock()
-    print "Erasing Flash...",
-    efm32.flashErase(flash_size, page_size)
-    start_time = time.time()
-    print "Programming Flash...",
-    efm32.flashProgram(vals)
-    time_passed = time.time() - start_time
-    print "Programmed %d bytes in %.2f seconds (%.2f kB/sec)." % (size,
-            time_passed, (size / 1024.0) / time_passed)
+    except Exception as e:
+        sys.stderr.write("Terminated!\n")
+        sys.stderr.write("Exception: {}\n".format(e))
+        exit(1)
+    finally:
+        try:
+            busPirate.tristatePins()    
+        except: pass
+        exit()
 
-    print "Resetting"
-    efm32.sysReset()
-    busPirate.tristatePins()
+
 
 if __name__ == "__main__":
     main()
